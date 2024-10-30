@@ -1,6 +1,6 @@
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
-import org.deeplearning4j.nn.conf.{MultiLayerConfiguration, NeuralNetConfiguration}
+import org.deeplearning4j.nn.conf.NeuralNetConfiguration
 import org.deeplearning4j.nn.conf.layers.{DenseLayer, OutputLayer}
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork
 import org.deeplearning4j.optimize.listeners.ScoreIterationListener
@@ -10,7 +10,6 @@ import org.deeplearning4j.util.ModelSerializer
 import org.nd4j.linalg.activations.Activation
 import org.nd4j.linalg.dataset.DataSet
 import org.nd4j.linalg.factory.Nd4j
-import org.nd4j.linalg.learning.config.Adam
 import org.nd4j.linalg.lossfunctions.LossFunctions
 
 import java.io.File
@@ -18,23 +17,73 @@ import java.io.File
 object HW2 {
 
   case class TokenData(word: String, token: Int, frequency: Int)
-  case class EmbeddingData(token: Int, embedding: Array[Double])
+  case class EmbeddingData(token: Int, word: String, embeddings: Array[Double])
   case class WindowedData(contextEmbedding: Array[Double], targetEmbedding: Array[Double])
 
   def main(args: Array[String]): Unit = {
     val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("local[*]")
     val sc = new SparkContext(conf)
 
-    // Load token data
-    val tokensRDD: RDD[TokenData] = sc.textFile("src/main/resources/input/part-r-00000").map { line =>
-      val Array(word, token, frequency) = line.split(",")
-      TokenData(word, token.toInt, frequency.toInt)
+    // Helper function to safely parse a string to an integer
+    def safeToInt(s: String): Option[Int] = {
+      try {
+        Some(s.toInt)
+      } catch {
+        case _: NumberFormatException => None
+      }
     }
 
-    // Load embedding data
-    val embeddingsRDD: RDD[EmbeddingData] = sc.textFile("src/main/resources/input/embeddings.csv").map { line =>
+    // Load token data with improved parsing to handle token arrays
+    val tokensRDD: RDD[TokenData] = sc.textFile("src/main/resources/input/part-r-00000").flatMap { line =>
       val parts = line.split(",")
-      EmbeddingData(parts(0).toInt, parts.drop(1).map(_.toDouble))
+      if (parts.length == 3) {
+        val word = parts(0)
+        val tokensList = parts(1).replaceAll("[\\[\\]]", "").split(" ").flatMap(safeToInt)
+        val frequency = safeToInt(parts(2))
+
+        frequency match {
+          case Some(freq) =>
+            // Map each token in tokensList to a separate TokenData instance
+            tokensList.map(token => TokenData(word, token, freq))
+          case None =>
+            println(s"Skipping line with invalid frequency: $line")
+            None
+        }
+      } else {
+        println(s"Skipping invalid line: $line")
+        None
+      }
+    }
+
+    // Helper function to safely parse a string to a Double
+    def safeToDouble(s: String): Option[Double] = {
+      try {
+        Some(s.toDouble)
+      } catch {
+        case _: NumberFormatException => None
+      }
+    }
+
+    // Load and parse the embedding data from CSV
+    val embeddingsRDD: RDD[EmbeddingData] = sc.textFile("src/main/resources/input/embeddings.csv").flatMap { line =>
+      val parts = line.split(",")
+
+      if (parts.length > 2) {
+        val tokenOpt = safeToInt(parts(0))
+        val word = parts(1)
+        val embeddings = parts.drop(2).flatMap(safeToDouble)  // Parse each embedding as Double
+
+        tokenOpt match {
+          case Some(token) if embeddings.nonEmpty =>
+            Some(EmbeddingData(token, word, embeddings))
+          case _ =>
+            println(s"Skipping line with invalid token ID or embedding values: $line")
+            None
+        }
+      } else {
+        println(s"Skipping invalid line: $line")
+        None
+      }
     }
 
     // Broadcast embeddings for efficiency
