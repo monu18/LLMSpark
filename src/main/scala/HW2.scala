@@ -13,8 +13,8 @@ import org.nd4j.linalg.factory.Nd4j
 import org.nd4j.linalg.lossfunctions.LossFunctions
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
-
-import java.io.OutputStream
+import java.io.OutputStreamWriter
+import org.apache.spark.storage.StorageLevel
 
 object HW2 {
 
@@ -32,6 +32,10 @@ object HW2 {
     val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
     val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
     val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
+    val statsOutputPath = "hdfs://localhost:9000/user/spark/output/training_stats.csv"
+
+    // Start timing the training
+    val startTime = System.currentTimeMillis()
 
     // Helper functions for safe parsing
     def safeToInt(s: String): Option[Int] = try Some(s.toInt) catch { case _: NumberFormatException => None }
@@ -90,7 +94,7 @@ object HW2 {
       val label = Nd4j.create(Array(window.targetEmbedding))
       new DataSet(input, label)
     }
-    val trainingJavaRDD = trainingDataRDD.toJavaRDD()
+    val trainingJavaRDD = trainingDataRDD.toJavaRDD().persist(StorageLevel.MEMORY_AND_DISK)  // Persist for memory usage tracking
 
     // Create and configure the model
     val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim)
@@ -100,15 +104,43 @@ object HW2 {
       .workerPrefetchNumBatches(2)
       .build()
 
+    // Listeners to track training loss, accuracy, and gradient statistics
+    model.setListeners(new ScoreIterationListener(10))  // Log every 10 iterations
+
     // Train the model using distributed Spark
     val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
     sparkModel.fit(trainingJavaRDD)
 
     // Save the model directly to HDFS
     val fs = FileSystem.get(sc.hadoopConfiguration)
-    val hdfsOutputStream: OutputStream = fs.create(new Path(modelOutputPath))
+    val hdfsOutputStream = fs.create(new Path(modelOutputPath))
     ModelSerializer.writeModel(sparkModel.getNetwork, hdfsOutputStream, true)
-    hdfsOutputStream.close()  // Close the stream after writing
+    hdfsOutputStream.close()
+
+    // Compute metrics and statistics
+    val endTime = System.currentTimeMillis()
+    val totalTrainingTime = endTime - startTime
+
+    // Collect Spark metrics
+    val totalExecutors = sc.getExecutorMemoryStatus.size
+    val storageStatus = sc.getRDDStorageInfo
+
+    // Collect training statistics
+    val statsMap = Map(
+      "Total Training Time (ms)" -> totalTrainingTime.toString,
+      "Total Executors" -> totalExecutors.toString,
+      "RDD Storage Information" -> storageStatus.mkString("; ")
+    )
+
+    // Write statistics to HDFS
+    val hdfsStatsOutputStream = fs.create(new Path(statsOutputPath))
+    val statsWriter = new OutputStreamWriter(hdfsStatsOutputStream, "UTF-8")
+    statsWriter.write("Metric,Value\n")
+    statsMap.foreach { case (metric, value) =>
+      statsWriter.write(s"$metric,$value\n")
+    }
+    statsWriter.close()
+    hdfsStatsOutputStream.close()
 
     // Stop Spark Context
     sc.stop()
@@ -153,7 +185,7 @@ object HW2 {
 
     val model = new MultiLayerNetwork(conf)
     model.init()
-    model.setListeners(new ScoreIterationListener(10))
+    model.setListeners(new ScoreIterationListener(10))  // Log every 10 iterations
     model
   }
 }
