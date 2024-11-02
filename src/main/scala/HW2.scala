@@ -13,6 +13,8 @@ import org.nd4j.linalg.factory.Nd4j
 import org.nd4j.linalg.lossfunctions.LossFunctions
 
 import java.io.File
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
 
 object HW2 {
@@ -23,7 +25,6 @@ object HW2 {
 
   def main(args: Array[String]): Unit = {
     // Set up Spark configuration
-//    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("local[*]")
     val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("spark://Monus-MacBook-Air.local:7077")
     val sc = new SparkContext(conf)
     Logger.getLogger("org").setLevel(Level.ERROR)
@@ -31,19 +32,11 @@ object HW2 {
     // Configurable parameters
     val windowSize = 4
     val batchSize = 32
-//    val embeddingPath = "src/main/resources/input/embeddings.csv"
-//    val tokenDataPath = "src/main/resources/input/part-r-00000"
-//    val modelOutputPath = "src/main/resources/output/decoder_model.zip"
-//    val embeddingPath = "/Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/embeddings.csv"
-//    val tokenDataPath = "/Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/part-r-00000"
-//    val modelOutputPath = "/Users/monu/IdeaProjects/LLMSpark/src/main/resources/output/decoder_model.zip"
-//    val embeddingPath = "file:///Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/embeddings.csv"
-//    val tokenDataPath = "file:///Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/part-r-00000"
-//    val modelOutputPath = "file:///Users/monu/IdeaProjects/LLMSpark/src/main/resources/output/decoder_model.zip"
-//    val modelOutputPath = "file:///tmp/decoder_model.zip"
-val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
+
+    val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
     val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
-    val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
+    val localModelOutputPath = "/tmp/decoder_model.zip"
+    val hdfsModelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
 
     // Helper function to safely parse a string to an integer
     def safeToInt(s: String): Option[Int] = {
@@ -132,8 +125,9 @@ val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
     val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
     sparkModel.fit(trainingJavaRDD)
 
-    // Save the trained model for inference
-    ModelSerializer.writeModel(sparkModel.getNetwork, new File(modelOutputPath), true)
+    // Save the trained model locally and copy it to HDFS
+    ModelSerializer.writeModel(sparkModel.getNetwork, new File(localModelOutputPath), true)
+    copyToLocalFileSystem(localModelOutputPath, hdfsModelOutputPath, sc)
 
     // Stop Spark Context
     sc.stop()
@@ -180,5 +174,11 @@ val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
     model.init()
     model.setListeners(new ScoreIterationListener(10))
     model
+  }
+
+  def copyToLocalFileSystem(localPath: String, hdfsPath: String, sc: SparkContext): Unit = {
+    val hadoopConfig = sc.hadoopConfiguration
+    val hdfs = FileSystem.get(hadoopConfig)
+    hdfs.copyFromLocalFile(new Path(localPath), new Path(hdfsPath))
   }
 }
