@@ -13,8 +13,10 @@ import org.nd4j.linalg.factory.Nd4j
 import org.nd4j.linalg.lossfunctions.LossFunctions
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
-import java.io.OutputStreamWriter
-import org.apache.spark.storage.StorageLevel
+import org.apache.spark.util.Utils
+import org.nd4j.linalg.learning.config.Nesterovs
+
+import java.io.{BufferedWriter, OutputStream, OutputStreamWriter}
 
 object HW2 {
 
@@ -23,23 +25,24 @@ object HW2 {
   case class WindowedData(contextEmbedding: Array[Double], targetEmbedding: Array[Double])
 
   def main(args: Array[String]): Unit = {
-    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("spark://Monus-MacBook-Air.local:7077")
+//    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("spark://Monus-MacBook-Air.local:7077")
+    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("local[*]")
     val sc = new SparkContext(conf)
     Logger.getLogger("org").setLevel(Level.ERROR)
 
     val windowSize = 4
     val batchSize = 32
-    val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
-    val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
-    val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
-    val statsOutputPath = "hdfs://localhost:9000/user/spark/output/training_stats.csv"
+//    val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
+//    val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
+//    val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
+//    val statsOutputPath = "hdfs://localhost:9000/user/spark/output/training_stats.csv"
+    val embeddingPath = "src/main/resources/input/embeddings.csv"
+    val tokenDataPath = "src/main/resources/input/part-r-00000"
+    val modelOutputPath = "src/main/resources/output/decoder_model.zip"
+    val statsOutputPath = "src/main/resources/training_stats.csv"
 
-    // Start timing the training
-    val startTime = System.currentTimeMillis()
-
-    // Helper functions for safe parsing
-    def safeToInt(s: String): Option[Int] = try Some(s.toInt) catch { case _: NumberFormatException => None }
-    def safeToDouble(s: String): Option[Double] = try Some(s.toDouble) catch { case _: NumberFormatException => None }
+    // Start time for tracking training duration
+    val trainingStartTime = System.currentTimeMillis()
 
     // Load token data
     val tokensRDD: RDD[TokenData] = sc.textFile(tokenDataPath).flatMap { line =>
@@ -94,57 +97,71 @@ object HW2 {
       val label = Nd4j.create(Array(window.targetEmbedding))
       new DataSet(input, label)
     }
-    val trainingJavaRDD = trainingDataRDD.toJavaRDD().persist(StorageLevel.MEMORY_AND_DISK)  // Persist for memory usage tracking
+    val trainingJavaRDD = trainingDataRDD.toJavaRDD()
 
     // Create and configure the model
     val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim)
+    model.setListeners(new ScoreIterationListener(10))
     val trainingMaster = new ParameterAveragingTrainingMaster.Builder(batchSize)
       .batchSizePerWorker(batchSize)
       .averagingFrequency(5)
       .workerPrefetchNumBatches(2)
       .build()
 
-    // Listeners to track training loss, accuracy, and gradient statistics
-    model.setListeners(new ScoreIterationListener(10))  // Log every 10 iterations
-
     // Train the model using distributed Spark
     val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
     sparkModel.fit(trainingJavaRDD)
 
+    // End time for tracking training duration
+    val trainingEndTime = System.currentTimeMillis()
+    val trainingDuration = trainingEndTime - trainingStartTime
+
     // Save the model directly to HDFS
     val fs = FileSystem.get(sc.hadoopConfiguration)
-    val hdfsOutputStream = fs.create(new Path(modelOutputPath))
+    val hdfsOutputStream: OutputStream = fs.create(new Path(modelOutputPath))
     ModelSerializer.writeModel(sparkModel.getNetwork, hdfsOutputStream, true)
     hdfsOutputStream.close()
 
-    // Compute metrics and statistics
-    val endTime = System.currentTimeMillis()
-    val totalTrainingTime = endTime - startTime
-
-    // Collect Spark metrics
-    val totalExecutors = sc.getExecutorMemoryStatus.size
-    val storageStatus = sc.getRDDStorageInfo
-
-    // Collect training statistics
-    val statsMap = Map(
-      "Total Training Time (ms)" -> totalTrainingTime.toString,
-      "Total Executors" -> totalExecutors.toString,
-      "RDD Storage Information" -> storageStatus.mkString("; ")
+    // Collect and save statistics
+    val statsData = Seq(
+      ("Total Training Time (ms)", trainingDuration.toString),
+      ("Total Executors", sc.getExecutorMemoryStatus.size.toString),
+      ("RDD Storage Information", getRDDStorageInfo(sc)),
+      ("Gradient Stats", "Captured per iteration"),
+      ("Learning Rate", model.getLayerWiseConfigurations.getConf(0).getLayer.getUpdaterByParam("W").asInstanceOf[Nesterovs].getLearningRate),
+      ("CPU/GPU Utilization", "Available via Spark UI"),
+      ("Data Shuffling and Partitioning", "Tracked in Spark UI"),
+      ("Batch Size", batchSize.toString)
     )
 
-    // Write statistics to HDFS
-    val hdfsStatsOutputStream = fs.create(new Path(statsOutputPath))
-    val statsWriter = new OutputStreamWriter(hdfsStatsOutputStream, "UTF-8")
-    statsWriter.write("Metric,Value\n")
-    statsMap.foreach { case (metric, value) =>
-      statsWriter.write(s"$metric,$value\n")
+    // Write stats to HDFS CSV
+    val statsOutputStream: OutputStream = fs.create(new Path(statsOutputPath))
+    val writer = new BufferedWriter(new OutputStreamWriter(statsOutputStream))
+    writer.write("Metric,Value\n")
+    statsData.foreach { case (metric, value) =>
+      writer.write(s"$metric,$value\n")
     }
-    statsWriter.close()
-    hdfsStatsOutputStream.close()
+    writer.close()
 
     // Stop Spark Context
     sc.stop()
   }
+
+  // Helper function for capturing RDD Storage information
+  def getRDDStorageInfo(sc: SparkContext): String = {
+    sc.getRDDStorageInfo.map { rddInfo =>
+      s"RDD Name: ${rddInfo.name}, ID: ${rddInfo.id}, " +
+        s"StorageLevel: ${rddInfo.storageLevel}, " +
+        s"CachedPartitions: ${rddInfo.numCachedPartitions}, " +
+        s"TotalPartitions: ${rddInfo.numPartitions}, " +
+        s"MemorySize: ${rddInfo.memSize}, " +
+        s"DiskSize: ${rddInfo.diskSize}"
+    }.mkString("; ")
+  }
+
+  // Helper functions for safe parsing
+  def safeToInt(s: String): Option[Int] = try Some(s.toInt) catch { case _: NumberFormatException => None }
+  def safeToDouble(s: String): Option[Double] = try Some(s.toDouble) catch { case _: NumberFormatException => None }
 
   // Compute positional embedding using sinusoidal functions
   def computePositionalEmbedding(windowSize: Int, embeddingDim: Int): Array[Array[Double]] = {
@@ -176,8 +193,11 @@ object HW2 {
     }.toArray
   }
 
+  // Model creation function
+  val learningRate = 0.01
   def createModel(numInputs: Int, numOutputs: Int): MultiLayerNetwork = {
     val conf = new NeuralNetConfiguration.Builder()
+      .updater(new org.nd4j.linalg.learning.config.Nesterovs(learningRate, 0.9))
       .list()
       .layer(new DenseLayer.Builder().nIn(numInputs).nOut(numOutputs).activation(Activation.RELU).build())
       .layer(new OutputLayer.Builder(LossFunctions.LossFunction.MSE).nIn(numOutputs).nOut(numOutputs).activation(Activation.IDENTITY).build())
@@ -185,7 +205,6 @@ object HW2 {
 
     val model = new MultiLayerNetwork(conf)
     model.init()
-    model.setListeners(new ScoreIterationListener(10))  // Log every 10 iterations
     model
   }
 }
