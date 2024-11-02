@@ -11,11 +11,10 @@ import org.nd4j.linalg.activations.Activation
 import org.nd4j.linalg.dataset.DataSet
 import org.nd4j.linalg.factory.Nd4j
 import org.nd4j.linalg.lossfunctions.LossFunctions
-
-import java.io.File
-import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
+
+import java.io.OutputStream
 
 object HW2 {
 
@@ -24,31 +23,21 @@ object HW2 {
   case class WindowedData(contextEmbedding: Array[Double], targetEmbedding: Array[Double])
 
   def main(args: Array[String]): Unit = {
-    // Set up Spark configuration
     val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("spark://Monus-MacBook-Air.local:7077")
     val sc = new SparkContext(conf)
     Logger.getLogger("org").setLevel(Level.ERROR)
 
-    // Configurable parameters
     val windowSize = 4
     val batchSize = 32
-
     val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
     val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
-    val localModelOutputPath = "/tmp/decoder_model.zip"
-    val hdfsModelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
+    val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
 
-    // Helper function to safely parse a string to an integer
-    def safeToInt(s: String): Option[Int] = {
-      try Some(s.toInt) catch { case _: NumberFormatException => None }
-    }
+    // Helper functions for safe parsing
+    def safeToInt(s: String): Option[Int] = try Some(s.toInt) catch { case _: NumberFormatException => None }
+    def safeToDouble(s: String): Option[Double] = try Some(s.toDouble) catch { case _: NumberFormatException => None }
 
-    // Helper function to safely parse a string to a Double
-    def safeToDouble(s: String): Option[Double] = {
-      try Some(s.toDouble) catch { case _: NumberFormatException => None }
-    }
-
-    // Load token data with improved parsing to handle token arrays
+    // Load token data
     val tokensRDD: RDD[TokenData] = sc.textFile(tokenDataPath).flatMap { line =>
       val parts = line.split(",")
       if (parts.length == 3) {
@@ -57,17 +46,12 @@ object HW2 {
         val frequency = safeToInt(parts(2))
         frequency match {
           case Some(freq) => tokensList.map(token => TokenData(word, token, freq))
-          case None =>
-            println(s"Skipping line with invalid frequency: $line")
-            None
+          case None => None
         }
-      } else {
-        println(s"Skipping invalid line: $line")
-        None
-      }
+      } else None
     }
 
-    // Load and parse the embedding data from CSV
+    // Load and parse the embedding data
     val embeddingsRDD: RDD[EmbeddingData] = sc.textFile(embeddingPath).flatMap { line =>
       val parts = line.split(",")
       if (parts.length > 2) {
@@ -76,14 +60,9 @@ object HW2 {
         val embeddings = parts.drop(2).flatMap(safeToDouble)
         tokenOpt match {
           case Some(token) if embeddings.nonEmpty => Some(EmbeddingData(token, word, embeddings))
-          case _ =>
-            println(s"Skipping line with invalid token ID or embedding values: $line")
-            None
+          case _ => None
         }
-      } else {
-        println(s"Skipping invalid line: $line")
-        None
-      }
+      } else None
     }
 
     // Broadcast embeddings for efficiency
@@ -95,7 +74,7 @@ object HW2 {
     val positionalEmbedding = computePositionalEmbedding(windowSize, embeddingDim)
     val positionalEmbeddingBroadcast = sc.broadcast(positionalEmbedding)
 
-    // Create sliding windows with positional embeddings using Spark
+    // Create sliding windows with positional embeddings
     val slidingWindowsRDD: RDD[WindowedData] = tokensRDD.mapPartitions { tokensIter =>
       createSlidingWindowsWithPositionalEmbedding(
         tokensIter.toArray,
@@ -107,8 +86,8 @@ object HW2 {
 
     // Prepare data for training
     val trainingDataRDD: RDD[DataSet] = slidingWindowsRDD.map { window =>
-      val input = Nd4j.create(Array(window.contextEmbedding)) // Ensure 2D shape for input
-      val label = Nd4j.create(Array(window.targetEmbedding))  // Ensure 2D shape for label
+      val input = Nd4j.create(Array(window.contextEmbedding))
+      val label = Nd4j.create(Array(window.targetEmbedding))
       new DataSet(input, label)
     }
     val trainingJavaRDD = trainingDataRDD.toJavaRDD()
@@ -125,9 +104,11 @@ object HW2 {
     val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
     sparkModel.fit(trainingJavaRDD)
 
-    // Save the trained model locally and copy it to HDFS
-    ModelSerializer.writeModel(sparkModel.getNetwork, new File(localModelOutputPath), true)
-    copyToLocalFileSystem(localModelOutputPath, hdfsModelOutputPath, sc)
+    // Save the model directly to HDFS
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    val hdfsOutputStream: OutputStream = fs.create(new Path(modelOutputPath))
+    ModelSerializer.writeModel(sparkModel.getNetwork, hdfsOutputStream, true)
+    hdfsOutputStream.close()  // Close the stream after writing
 
     // Stop Spark Context
     sc.stop()
@@ -174,11 +155,5 @@ object HW2 {
     model.init()
     model.setListeners(new ScoreIterationListener(10))
     model
-  }
-
-  def copyToLocalFileSystem(localPath: String, hdfsPath: String, sc: SparkContext): Unit = {
-    val hadoopConfig = sc.hadoopConfiguration
-    val hdfs = FileSystem.get(hadoopConfig)
-    hdfs.copyFromLocalFile(new Path(localPath), new Path(hdfsPath))
   }
 }
