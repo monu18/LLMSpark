@@ -1,4 +1,5 @@
 import sbt.Keys.libraryDependencies
+import sbtassembly.AssemblyPlugin.autoImport.*
 
 ThisBuild / version := "0.1.0-SNAPSHOT"
 
@@ -17,7 +18,7 @@ val slf4jLoggerVersion = "2.0.12"
 val typeSafeConfigVersion = "1.4.3"
 val breezeVersion = "2.1.0"
 val deepLearning4jVersion = "1.0.0-M2.1"
-val sparkVersion = "3.5.1"  // Fully compatible with DL4J
+val sparkVersion = "3.3.0"  // Fully compatible with DL4J Parameter Server
 
 // Library Dependencies
 libraryDependencies ++= Seq(
@@ -37,11 +38,31 @@ libraryDependencies ++= Seq(
   "org.deeplearning4j" % "deeplearning4j-core" % deepLearning4jVersion,
   "org.deeplearning4j" % "dl4j-spark-parameterserver_2.12" % deepLearning4jVersion,
   "org.nd4j" % "nd4j-native-platform" % deepLearning4jVersion,
-  "org.deeplearning4j" % "deeplearning4j-nlp" % deepLearning4jVersion,
+  // Optional: Add "nd4j-native" for platform-specific native support
+  // "org.nd4j" % "nd4j-native" % deepLearning4jVersion,
 
   // Testing libraries
   "org.scalatest" %% "scalatest" % "3.2.18" % Test
 )
 
 // Main Class Configuration (Optional)
-Compile / mainClass := Option("edu.uic.llmspark.HW2")
+Compile / mainClass := Option("HW2")
+
+assembly / assemblyJarName := "LLMSpark.jar" // Name of your jar file
+
+assembly / mainClass := Some("HW2") // Ensure this points to your main class
+// Merging Strategies for Assembly
+assembly / assemblyMergeStrategy := {
+  case PathList("META-INF", xs @ _*) =>
+    xs match {
+      case "MANIFEST.MF" :: Nil => MergeStrategy.discard
+      case "services" :: _      => MergeStrategy.concat
+      case _                    => MergeStrategy.discard
+    }
+  case "reference.conf" => MergeStrategy.concat
+  case x if x.endsWith(".proto") => MergeStrategy.rename
+  case x if x.contains("hadoop") => MergeStrategy.first
+  case _ => MergeStrategy.first
+}
+
+assembly / assemblyOption := (assembly / assemblyOption).value.withIncludeScala(true)

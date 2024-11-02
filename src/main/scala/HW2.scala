@@ -13,6 +13,7 @@ import org.nd4j.linalg.factory.Nd4j
 import org.nd4j.linalg.lossfunctions.LossFunctions
 
 import java.io.File
+import org.apache.log4j.{Level, Logger}
 
 object HW2 {
 
@@ -21,30 +22,48 @@ object HW2 {
   case class WindowedData(contextEmbedding: Array[Double], targetEmbedding: Array[Double])
 
   def main(args: Array[String]): Unit = {
-    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("local[*]")
+    // Set up Spark configuration
+//    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("local[*]")
+    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("spark://Monus-MacBook-Air.local:7077")
     val sc = new SparkContext(conf)
+    Logger.getLogger("org").setLevel(Level.ERROR)
+
+    // Configurable parameters
+    val windowSize = 4
+    val batchSize = 32
+//    val embeddingPath = "src/main/resources/input/embeddings.csv"
+//    val tokenDataPath = "src/main/resources/input/part-r-00000"
+//    val modelOutputPath = "src/main/resources/output/decoder_model.zip"
+//    val embeddingPath = "/Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/embeddings.csv"
+//    val tokenDataPath = "/Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/part-r-00000"
+//    val modelOutputPath = "/Users/monu/IdeaProjects/LLMSpark/src/main/resources/output/decoder_model.zip"
+//    val embeddingPath = "file:///Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/embeddings.csv"
+//    val tokenDataPath = "file:///Users/monu/IdeaProjects/LLMSpark/src/main/resources/input/part-r-00000"
+//    val modelOutputPath = "file:///Users/monu/IdeaProjects/LLMSpark/src/main/resources/output/decoder_model.zip"
+//    val modelOutputPath = "file:///tmp/decoder_model.zip"
+val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
+    val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
+    val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
 
     // Helper function to safely parse a string to an integer
     def safeToInt(s: String): Option[Int] = {
-      try {
-        Some(s.toInt)
-      } catch {
-        case _: NumberFormatException => None
-      }
+      try Some(s.toInt) catch { case _: NumberFormatException => None }
+    }
+
+    // Helper function to safely parse a string to a Double
+    def safeToDouble(s: String): Option[Double] = {
+      try Some(s.toDouble) catch { case _: NumberFormatException => None }
     }
 
     // Load token data with improved parsing to handle token arrays
-    val tokensRDD: RDD[TokenData] = sc.textFile("src/main/resources/input/part-r-00000").flatMap { line =>
+    val tokensRDD: RDD[TokenData] = sc.textFile(tokenDataPath).flatMap { line =>
       val parts = line.split(",")
       if (parts.length == 3) {
         val word = parts(0)
         val tokensList = parts(1).replaceAll("[\\[\\]]", "").split(" ").flatMap(safeToInt)
         val frequency = safeToInt(parts(2))
-
         frequency match {
-          case Some(freq) =>
-            // Map each token in tokensList to a separate TokenData instance
-            tokensList.map(token => TokenData(word, token, freq))
+          case Some(freq) => tokensList.map(token => TokenData(word, token, freq))
           case None =>
             println(s"Skipping line with invalid frequency: $line")
             None
@@ -55,27 +74,15 @@ object HW2 {
       }
     }
 
-    // Helper function to safely parse a string to a Double
-    def safeToDouble(s: String): Option[Double] = {
-      try {
-        Some(s.toDouble)
-      } catch {
-        case _: NumberFormatException => None
-      }
-    }
-
     // Load and parse the embedding data from CSV
-    val embeddingsRDD: RDD[EmbeddingData] = sc.textFile("src/main/resources/input/embeddings.csv").flatMap { line =>
+    val embeddingsRDD: RDD[EmbeddingData] = sc.textFile(embeddingPath).flatMap { line =>
       val parts = line.split(",")
-
       if (parts.length > 2) {
         val tokenOpt = safeToInt(parts(0))
         val word = parts(1)
-        val embeddings = parts.drop(2).flatMap(safeToDouble)  // Parse each embedding as Double
-
+        val embeddings = parts.drop(2).flatMap(safeToDouble)
         tokenOpt match {
-          case Some(token) if embeddings.nonEmpty =>
-            Some(EmbeddingData(token, word, embeddings))
+          case Some(token) if embeddings.nonEmpty => Some(EmbeddingData(token, word, embeddings))
           case _ =>
             println(s"Skipping line with invalid token ID or embedding values: $line")
             None
@@ -87,11 +94,10 @@ object HW2 {
     }
 
     // Broadcast embeddings for efficiency
-    val embeddingMap = embeddingsRDD.collect().map(e => e.token -> e.embedding).toMap
+    val embeddingMap = embeddingsRDD.collect().map(e => e.token -> e.embeddings).toMap
     val embeddingMapBroadcast = sc.broadcast(embeddingMap)
 
     // Define parameters for sliding windows and embeddings
-    val windowSize = 4
     val embeddingDim = embeddingMapBroadcast.value.head._2.length
     val positionalEmbedding = computePositionalEmbedding(windowSize, embeddingDim)
     val positionalEmbeddingBroadcast = sc.broadcast(positionalEmbedding)
@@ -108,16 +114,16 @@ object HW2 {
 
     // Prepare data for training
     val trainingDataRDD: RDD[DataSet] = slidingWindowsRDD.map { window =>
-      val input = Nd4j.create(window.contextEmbedding)
-      val label = Nd4j.create(window.targetEmbedding)
+      val input = Nd4j.create(Array(window.contextEmbedding)) // Ensure 2D shape for input
+      val label = Nd4j.create(Array(window.targetEmbedding))  // Ensure 2D shape for label
       new DataSet(input, label)
     }
     val trainingJavaRDD = trainingDataRDD.toJavaRDD()
 
     // Create and configure the model
     val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim)
-    val trainingMaster = new ParameterAveragingTrainingMaster.Builder(32)
-      .batchSizePerWorker(32)
+    val trainingMaster = new ParameterAveragingTrainingMaster.Builder(batchSize)
+      .batchSizePerWorker(batchSize)
       .averagingFrequency(5)
       .workerPrefetchNumBatches(2)
       .build()
@@ -127,7 +133,7 @@ object HW2 {
     sparkModel.fit(trainingJavaRDD)
 
     // Save the trained model for inference
-    ModelSerializer.writeModel(sparkModel.getNetwork, new File("src/main/resources/output/decoder_model.zip"), true)
+    ModelSerializer.writeModel(sparkModel.getNetwork, new File(modelOutputPath), true)
 
     // Stop Spark Context
     sc.stop()
@@ -163,12 +169,11 @@ object HW2 {
     }.toArray
   }
 
-  // Create and configure DL4J model
   def createModel(numInputs: Int, numOutputs: Int): MultiLayerNetwork = {
     val conf = new NeuralNetConfiguration.Builder()
       .list()
-      .layer(new DenseLayer.Builder().nIn(10).nOut(10).activation(Activation.RELU).build())
-      .layer(new OutputLayer.Builder(LossFunctions.LossFunction.MSE).nIn(10).nOut(10).activation(Activation.SOFTMAX).build())
+      .layer(new DenseLayer.Builder().nIn(numInputs).nOut(numOutputs).activation(Activation.RELU).build())
+      .layer(new OutputLayer.Builder(LossFunctions.LossFunction.MSE).nIn(numOutputs).nOut(numOutputs).activation(Activation.IDENTITY).build())
       .build()
 
     val model = new MultiLayerNetwork(conf)
