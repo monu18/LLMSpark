@@ -1,5 +1,5 @@
 Metric,Value
-Total Training Time (ms),4752
+Total Training Time (ms),3528
 Total Executors,1
 RDD Storage Information,
 Gradient Stats,Captured per iteration

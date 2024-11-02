@@ -1,3 +1,5 @@
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.apache.log4j.{Level, Logger}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration
@@ -10,11 +12,8 @@ import org.deeplearning4j.util.ModelSerializer
 import org.nd4j.linalg.activations.Activation
 import org.nd4j.linalg.dataset.DataSet
 import org.nd4j.linalg.factory.Nd4j
-import org.nd4j.linalg.lossfunctions.LossFunctions
-import org.apache.hadoop.fs.{FileSystem, Path}
-import org.apache.log4j.{Level, Logger}
-import org.apache.spark.util.Utils
 import org.nd4j.linalg.learning.config.Nesterovs
+import org.nd4j.linalg.lossfunctions.LossFunctions
 
 import java.io.{BufferedWriter, OutputStream, OutputStreamWriter}
 
@@ -25,21 +24,46 @@ object HW2 {
   case class WindowedData(contextEmbedding: Array[Double], targetEmbedding: Array[Double])
 
   def main(args: Array[String]): Unit = {
-//    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("spark://Monus-MacBook-Air.local:7077")
-    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster("local[*]")
+    // Determine the environment
+    val env = if (args.nonEmpty) args(0) else sys.env.getOrElse("APP_ENV", "local")
+    println("env " + env)
+
+    // Configure paths and Spark master based on environment
+    val (embeddingPath, tokenDataPath, modelOutputPath, statsOutputPath, master) = env match {
+      case "spark" =>
+        (
+          "hdfs://localhost:9000/user/spark/input/embeddings.csv",
+          "hdfs://localhost:9000/user/spark/input/part-r-00000",
+          "hdfs://localhost:9000/user/spark/output/decoder_model.zip",
+          "hdfs://localhost:9000/user/spark/output/training_stats.csv",
+          "spark://Monus-MacBook-Air.local:7077"
+        )
+      case "aws" =>
+        (
+          "s3://yourbucket/input/embeddings.csv",
+          "s3://yourbucket/input/part-r-00000",
+          "s3://yourbucket/output/decoder_model.zip",
+          "s3://yourbucket/output/training_stats.csv",
+          "yarn"
+        )
+      case _ => // Local
+        (
+          "src/main/resources/input/embeddings.csv",
+          "src/main/resources/input/part-r-00000",
+          "src/main/resources/output/decoder_model.zip",
+          "src/main/resources/output/training_stats.csv",
+          "local[*]"
+        )
+    }
+
+    // Set up Spark configuration
+    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster(master)
     val sc = new SparkContext(conf)
     Logger.getLogger("org").setLevel(Level.ERROR)
 
+    // Parameters
     val windowSize = 4
     val batchSize = 32
-//    val embeddingPath = "hdfs://localhost:9000/user/spark/input/embeddings.csv"
-//    val tokenDataPath = "hdfs://localhost:9000/user/spark/input/part-r-00000"
-//    val modelOutputPath = "hdfs://localhost:9000/user/spark/output/decoder_model.zip"
-//    val statsOutputPath = "hdfs://localhost:9000/user/spark/output/training_stats.csv"
-    val embeddingPath = "src/main/resources/input/embeddings.csv"
-    val tokenDataPath = "src/main/resources/input/part-r-00000"
-    val modelOutputPath = "src/main/resources/output/decoder_model.zip"
-    val statsOutputPath = "src/main/resources/training_stats.csv"
 
     // Start time for tracking training duration
     val trainingStartTime = System.currentTimeMillis()
@@ -197,7 +221,7 @@ object HW2 {
   val learningRate = 0.01
   def createModel(numInputs: Int, numOutputs: Int): MultiLayerNetwork = {
     val conf = new NeuralNetConfiguration.Builder()
-      .updater(new org.nd4j.linalg.learning.config.Nesterovs(learningRate, 0.9))
+      .updater(new Nesterovs(learningRate, 0.9))
       .list()
       .layer(new DenseLayer.Builder().nIn(numInputs).nOut(numOutputs).activation(Activation.RELU).build())
       .layer(new OutputLayer.Builder(LossFunctions.LossFunction.MSE).nIn(numOutputs).nOut(numOutputs).activation(Activation.IDENTITY).build())
