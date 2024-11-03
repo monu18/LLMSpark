@@ -29,18 +29,19 @@ object HW2 {
     val logger = Logger.getLogger(getClass.getName)
     Logger.getLogger("org").setLevel(Level.ERROR)
 
+    // Log application start
+    logger.info("Starting HW2 application")
+
     // Check if enough arguments are passed
     if (args.length < 5) {
-      logger.warn("args length is less than 5")
+      logger.warn("Not enough arguments passed. Expected at least 5 arguments.")
     }
 
     // Initialize configuration
     ConfigUtil.initializeConfig(args.toList)
-
-    // Access configuration values
     val config = ConfigUtil.finalConfig
 
-    // Extract arguments or use defaults from config
+    // Access configuration values
     val embeddingPath = config.embeddingPath
     val tokenDataPath = config.tokenDataPath
     val modelOutputPath = config.modelOutputPath
@@ -51,12 +52,8 @@ object HW2 {
     val batchSize = config.batchSize
     val windowSize = config.windowSize
 
-    logger.info(s"Embedding path: $embeddingPath")
-    logger.info(s"Token data path: $tokenDataPath")
-    logger.info(s"Model output path: $modelOutputPath")
-    logger.info(s"Stats output path: $statsOutputPath")
-    logger.info(s"Spark master: $master")
-
+    // Log configuration details
+    logger.info(s"Configuration loaded with Master: $master, Window Size: $windowSize, Learning Rate: $learningRate")
 
     // Set up Spark configuration
     val conf = new SparkConf().setAppName("LLMSpark").setMaster(master)
@@ -64,108 +61,134 @@ object HW2 {
 
     // Start time for tracking training duration
     val trainingStartTime = System.currentTimeMillis()
+    logger.info("Training started")
 
-    // Load token data
-    val tokensRDD: RDD[TokenData] = sc.textFile(tokenDataPath).flatMap { line =>
-      val parts = line.split(",")
-      if (parts.length == 3) {
-        val word = parts(0)
-        val tokensList = parts(1).replaceAll("[\\[\\]]", "").split(" ").flatMap(safeToInt)
-        val frequency = safeToInt(parts(2))
-        frequency match {
-          case Some(freq) => tokensList.map(token => TokenData(word, token, freq))
-          case None => None
+    try {
+      // Load token data
+      val tokensRDD: RDD[TokenData] = sc.textFile(tokenDataPath).flatMap { line =>
+        val parts = line.split(",")
+        if (parts.length == 3) {
+          val word = parts(0)
+          val tokensList = parts(1).replaceAll("[\\[\\]]", "").split(" ").flatMap(safeToInt)
+          val frequency = safeToInt(parts(2))
+          frequency match {
+            case Some(freq) => tokensList.map(token => TokenData(word, token, freq))
+            case None => None
+          }
+        } else None
+      }
+      logger.info("Token data loaded successfully")
+
+      // Load and parse the embedding data
+      val embeddingsRDD: RDD[EmbeddingData] = sc.textFile(embeddingPath).flatMap { line =>
+        val parts = line.split(",")
+        if (parts.length > 2) {
+          val tokenOpt = safeToInt(parts(0))
+          val word = parts(1)
+          val embeddings = parts.drop(2).flatMap(safeToDouble)
+          tokenOpt match {
+            case Some(token) if embeddings.nonEmpty => Some(EmbeddingData(token, word, embeddings))
+            case _ => None
+          }
+        } else None
+      }
+      logger.info("Embedding data loaded successfully")
+
+      // Broadcast embeddings for efficiency
+      val embeddingMap = embeddingsRDD.collect().map(e => e.token -> e.embeddings).toMap
+      val embeddingMapBroadcast = sc.broadcast(embeddingMap)
+      logger.trace("Embeddings broadcasted")
+
+      // Define parameters for sliding windows and embeddings
+      val embeddingDim = embeddingMapBroadcast.value.head._2.length
+      val positionalEmbedding = computePositionalEmbedding(windowSize, embeddingDim)
+      val positionalEmbeddingBroadcast = sc.broadcast(positionalEmbedding)
+      logger.trace("Positional embeddings broadcasted")
+
+      // Create sliding windows with positional embeddings
+      val slidingWindowsRDD: RDD[WindowedData] = tokensRDD.mapPartitions { tokensIter =>
+        createSlidingWindowsWithPositionalEmbedding(
+          tokensIter.toArray,
+          windowSize,
+          embeddingMapBroadcast,
+          positionalEmbeddingBroadcast
+        ).iterator
+      }
+      logger.info("Sliding windows with positional embeddings created")
+
+      // Prepare data for training
+      val trainingDataRDD: RDD[DataSet] = slidingWindowsRDD.map { window =>
+        val input = Nd4j.create(Array(window.contextEmbedding))
+        val label = Nd4j.create(Array(window.targetEmbedding))
+        new DataSet(input, label)
+      }
+      val trainingJavaRDD = trainingDataRDD.toJavaRDD()
+      logger.info("Training data prepared")
+
+      // Create and configure the model
+      val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim, learningRate, momentum)
+      model.setListeners(new ScoreIterationListener(10))
+      val trainingMaster = new ParameterAveragingTrainingMaster.Builder(batchSize)
+        .batchSizePerWorker(batchSize)
+        .averagingFrequency(5)
+        .workerPrefetchNumBatches(2)
+        .build()
+      logger.info("Model configured and listeners added")
+
+      // Train the model using distributed Spark
+      val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
+      sparkModel.fit(trainingJavaRDD)
+      logger.info("Model training completed")
+
+      // End time for tracking training duration
+      val trainingEndTime = System.currentTimeMillis()
+      val trainingDuration = trainingEndTime - trainingStartTime
+      logger.info(s"Total training duration: $trainingDuration ms")
+
+      // Save the model
+      try {
+        val fs = FileSystem.get(sc.hadoopConfiguration)
+        val hdfsOutputStream: OutputStream = fs.create(new Path(modelOutputPath))
+        ModelSerializer.writeModel(sparkModel.getNetwork, hdfsOutputStream, true)
+        hdfsOutputStream.close()
+        logger.info(s"Model saved to $modelOutputPath")
+      } catch {
+        case ex: Exception => logger.error(s"Error saving model to $modelOutputPath", ex)
+      }
+
+      // Collect and save statistics
+      val statsData = Seq(
+        ("Total Training Time (ms)", trainingDuration.toString),
+        ("Total Executors", sc.getExecutorMemoryStatus.size.toString),
+        ("RDD Storage Information", getRDDStorageInfo(sc)),
+        ("Gradient Stats", "Captured per iteration"),
+        ("Learning Rate", model.getLayerWiseConfigurations.getConf(0).getLayer.getUpdaterByParam("W").asInstanceOf[Nesterovs].getLearningRate),
+        ("CPU/GPU Utilization", "Available via Spark UI"),
+        ("Data Shuffling and Partitioning", "Tracked in Spark UI"),
+        ("Batch Size", batchSize.toString)
+      )
+
+      try {
+        val fs = FileSystem.get(sc.hadoopConfiguration)
+        val statsOutputStream: OutputStream = fs.create(new Path(statsOutputPath))
+        val writer = new BufferedWriter(new OutputStreamWriter(statsOutputStream))
+        writer.write("Metric,Value\n")
+        statsData.foreach { case (metric, value) =>
+          writer.write(s"$metric,$value\n")
         }
-      } else None
+        writer.close()
+        logger.info(s"Statistics saved to $statsOutputPath")
+      } catch {
+        case ex: Exception => logger.error(s"Error saving statistics to $statsOutputPath", ex)
+      }
+
+    } catch {
+      case ex: Exception =>
+        logger.error("An error occurred during the execution of HW2", ex)
+    } finally {
+      sc.stop()
+      logger.info("SparkContext stopped and application ended")
     }
-
-    // Load and parse the embedding data
-    val embeddingsRDD: RDD[EmbeddingData] = sc.textFile(embeddingPath).flatMap { line =>
-      val parts = line.split(",")
-      if (parts.length > 2) {
-        val tokenOpt = safeToInt(parts(0))
-        val word = parts(1)
-        val embeddings = parts.drop(2).flatMap(safeToDouble)
-        tokenOpt match {
-          case Some(token) if embeddings.nonEmpty => Some(EmbeddingData(token, word, embeddings))
-          case _ => None
-        }
-      } else None
-    }
-
-    // Broadcast embeddings for efficiency
-    val embeddingMap = embeddingsRDD.collect().map(e => e.token -> e.embeddings).toMap
-    val embeddingMapBroadcast = sc.broadcast(embeddingMap)
-
-    // Define parameters for sliding windows and embeddings
-    val embeddingDim = embeddingMapBroadcast.value.head._2.length
-    val positionalEmbedding = computePositionalEmbedding(windowSize, embeddingDim)
-    val positionalEmbeddingBroadcast = sc.broadcast(positionalEmbedding)
-
-    // Create sliding windows with positional embeddings
-    val slidingWindowsRDD: RDD[WindowedData] = tokensRDD.mapPartitions { tokensIter =>
-      createSlidingWindowsWithPositionalEmbedding(
-        tokensIter.toArray,
-        windowSize,
-        embeddingMapBroadcast,
-        positionalEmbeddingBroadcast
-      ).iterator
-    }
-
-    // Prepare data for training
-    val trainingDataRDD: RDD[DataSet] = slidingWindowsRDD.map { window =>
-      val input = Nd4j.create(Array(window.contextEmbedding))
-      val label = Nd4j.create(Array(window.targetEmbedding))
-      new DataSet(input, label)
-    }
-    val trainingJavaRDD = trainingDataRDD.toJavaRDD()
-
-    // Create and configure the model
-    val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim, learningRate, momentum)
-    model.setListeners(new ScoreIterationListener(10))
-    val trainingMaster = new ParameterAveragingTrainingMaster.Builder(batchSize)
-      .batchSizePerWorker(batchSize)
-      .averagingFrequency(5)
-      .workerPrefetchNumBatches(2)
-      .build()
-
-    // Train the model using distributed Spark
-    val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
-    sparkModel.fit(trainingJavaRDD)
-
-    // End time for tracking training duration
-    val trainingEndTime = System.currentTimeMillis()
-    val trainingDuration = trainingEndTime - trainingStartTime
-
-    // Save the model directly to HDFS
-    val fs = FileSystem.get(sc.hadoopConfiguration)
-    val hdfsOutputStream: OutputStream = fs.create(new Path(modelOutputPath))
-    ModelSerializer.writeModel(sparkModel.getNetwork, hdfsOutputStream, true)
-    hdfsOutputStream.close()
-
-    // Collect and save statistics
-    val statsData = Seq(
-      ("Total Training Time (ms)", trainingDuration.toString),
-      ("Total Executors", sc.getExecutorMemoryStatus.size.toString),
-      ("RDD Storage Information", getRDDStorageInfo(sc)),
-      ("Gradient Stats", "Captured per iteration"),
-      ("Learning Rate", model.getLayerWiseConfigurations.getConf(0).getLayer.getUpdaterByParam("W").asInstanceOf[Nesterovs].getLearningRate),
-      ("CPU/GPU Utilization", "Available via Spark UI"),
-      ("Data Shuffling and Partitioning", "Tracked in Spark UI"),
-      ("Batch Size", batchSize.toString)
-    )
-
-    // Write stats to HDFS CSV
-    val statsOutputStream: OutputStream = fs.create(new Path(statsOutputPath))
-    val writer = new BufferedWriter(new OutputStreamWriter(statsOutputStream))
-    writer.write("Metric,Value\n")
-    statsData.foreach { case (metric, value) =>
-      writer.write(s"$metric,$value\n")
-    }
-    writer.close()
-
-    // Stop Spark Context
-    sc.stop()
   }
 
   // Helper function for capturing RDD Storage information
