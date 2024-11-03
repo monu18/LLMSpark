@@ -24,37 +24,52 @@ object HW2 {
   case class WindowedData(contextEmbedding: Array[Double], targetEmbedding: Array[Double])
 
   def main(args: Array[String]): Unit = {
+
+    // Check if enough arguments are passed
+    if (args.length < 5) {
+      println("Usage: HW2 <embeddingPath> <tokenDataPath> <modelOutputPath> <statsOutputPath> <master>")
+      sys.exit(1)
+    }
+
+    // Extract arguments from the command line
+    val embeddingPath = args(0)
+    val tokenDataPath = args(1)
+    val modelOutputPath = args(2)
+    val statsOutputPath = args(3)
+    val master = args(4)
+
     // Determine the environment
-    val env = if (args.nonEmpty) args(0) else sys.env.getOrElse("APP_ENV", "local")
-    println("env " + env)
+//    val env = if (args.nonEmpty) args(0) else sys.env.getOrElse("APP_ENV", "local")
+//    println("env " + env)
 
     // Configure paths and Spark master based on environment
-    val (embeddingPath, tokenDataPath, modelOutputPath, statsOutputPath, master) = env match {
-      case "spark" =>
-        (
-          "hdfs://localhost:9000/user/spark/input/embeddings.csv",
-          "hdfs://localhost:9000/user/spark/input/part-r-00000",
-          "hdfs://localhost:9000/user/spark/output/decoder_model.zip",
-          "hdfs://localhost:9000/user/spark/output/training_stats.csv",
-          "spark://Monus-MacBook-Air.local:7077"
-        )
-      case "aws" =>
-        (
-          "s3://llmspark/input/embeddings.csv",
-          "s3://llmspark/input/part-r-00000",
-          "s3://llmspark/output/decoder_model.zip",
-          "s3://llmspark/output/training_stats.csv",
-          "yarn"
-        )
-      case _ => // Local
-        (
-          "src/main/resources/input/embeddings.csv",
-          "src/main/resources/input/part-r-00000",
-          "src/main/resources/output/decoder_model.zip",
-          "src/main/resources/output/training_stats.csv",
-          "local[*]"
-        )
-    }
+//    val (embeddingPath, tokenDataPath, modelOutputPath, statsOutputPath, master) = env match {
+//      case "spark" =>
+//        (
+//          "hdfs://localhost:9000/user/spark/input/embeddings.csv",
+//          "hdfs://localhost:9000/user/spark/input/part-r-00000",
+//          "hdfs://localhost:9000/user/spark/output/decoder_model.zip",
+//          "hdfs://localhost:9000/user/spark/output/training_stats.csv",
+//          "spark://Monus-MacBook-Air.local:7077"
+//        )
+//      case "aws" =>
+//        (
+//          "s3://llmspark/input/embeddings.csv",
+//          "s3://llmspark/input/part-r-00000",
+//          "s3://llmspark/output/decoder_model.zip",
+//          "s3://llmspark/output/training_stats.csv",
+//          "yarn"
+//        )
+//      case _ => // Local
+//        (
+//          "src/main/resources/input/embeddings.csv",
+//          "src/main/resources/input/part-r-00000",
+//          "src/main/resources/output/decoder_model.zip",
+//          "src/main/resources/output/training_stats.csv",
+//          "local[*]"
+//        )
+//    }
+
 
     // Set up Spark configuration
     val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster(master)
