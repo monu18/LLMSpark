@@ -42,9 +42,12 @@ libraryDependencies ++= Seq(
   // "org.nd4j" % "nd4j-native" % deepLearning4jVersion,
 
   // Testing libraries
-  "org.scalatest" %% "scalatest" % "3.2.18" % Test
+  "org.scalatest" %% "scalatest" % "3.2.18" % Test,
+  "org.mockito" %% "mockito-scala" % "1.16.42" % Test
 )
 
+Test / parallelExecution := false
+Test / fork := true
 // Main Class Configuration (Optional)
 Compile / mainClass := Option("HW2")
 

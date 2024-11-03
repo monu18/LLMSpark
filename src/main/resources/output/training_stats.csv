@@ -1,7 +1,7 @@
 Metric,Value
-Total Training Time (ms),3267
+Total Training Time (ms),2956
 Total Executors,1
-RDD Storage Information,RDD Name: MapPartitionsRDD, ID: 17, StorageLevel: StorageLevel(disk, memory, deserialized, 1 replicas), CachedPartitions: 8, TotalPartitions: 8, MemorySize: 4032, DiskSize: 0; RDD Name: /tmp/hadoop-monu/dl4j/1730616284776_-5213c3f/7/paths/, ID: 11, StorageLevel: StorageLevel(memory, deserialized, 1 replicas), CachedPartitions: 2, TotalPartitions: 2, MemorySize: 1280, DiskSize: 0
+RDD Storage Information,RDD Name: MapPartitionsRDD, ID: 17, StorageLevel: StorageLevel(disk, memory, deserialized, 1 replicas), CachedPartitions: 8, TotalPartitions: 8, MemorySize: 4032, DiskSize: 0; RDD Name: /tmp/hadoop-monu/dl4j/1730626209342_22c43581/7/paths/, ID: 11, StorageLevel: StorageLevel(memory, deserialized, 1 replicas), CachedPartitions: 2, TotalPartitions: 2, MemorySize: 1280, DiskSize: 0
 Gradient Stats,Captured per iteration
 Learning Rate,0.01
 CPU/GPU Utilization,Available via Spark UI

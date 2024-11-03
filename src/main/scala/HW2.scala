@@ -65,33 +65,11 @@ object HW2 {
 
     try {
       // Load token data
-      val tokensRDD: RDD[TokenData] = sc.textFile(tokenDataPath).flatMap { line =>
-        val parts = line.split(",")
-        if (parts.length == 3) {
-          val word = parts(0)
-          val tokensList = parts(1).replaceAll("[\\[\\]]", "").split(" ").flatMap(safeToInt)
-          val frequency = safeToInt(parts(2))
-          frequency match {
-            case Some(freq) => tokensList.map(token => TokenData(word, token, freq))
-            case None => None
-          }
-        } else None
-      }
+      val tokensRDD = loadTokenData(sc, tokenDataPath)
       logger.info("Token data loaded successfully")
 
       // Load and parse the embedding data
-      val embeddingsRDD: RDD[EmbeddingData] = sc.textFile(embeddingPath).flatMap { line =>
-        val parts = line.split(",")
-        if (parts.length > 2) {
-          val tokenOpt = safeToInt(parts(0))
-          val word = parts(1)
-          val embeddings = parts.drop(2).flatMap(safeToDouble)
-          tokenOpt match {
-            case Some(token) if embeddings.nonEmpty => Some(EmbeddingData(token, word, embeddings))
-            case _ => None
-          }
-        } else None
-      }
+      val embeddingsRDD = loadEmbeddingData(sc, embeddingPath)
       logger.info("Embedding data loaded successfully")
 
       // Broadcast embeddings for efficiency
@@ -147,10 +125,7 @@ object HW2 {
 
       // Save the model
       try {
-        val fs = FileSystem.get(sc.hadoopConfiguration)
-        val hdfsOutputStream: OutputStream = fs.create(new Path(modelOutputPath))
-        ModelSerializer.writeModel(sparkModel.getNetwork, hdfsOutputStream, true)
-        hdfsOutputStream.close()
+        saveModel(sc, model, modelOutputPath)
         logger.info(s"Model saved to $modelOutputPath")
       } catch {
         case ex: Exception => logger.error(s"Error saving model to $modelOutputPath", ex)
@@ -162,21 +137,14 @@ object HW2 {
         ("Total Executors", sc.getExecutorMemoryStatus.size.toString),
         ("RDD Storage Information", getRDDStorageInfo(sc)),
         ("Gradient Stats", "Captured per iteration"),
-        ("Learning Rate", model.getLayerWiseConfigurations.getConf(0).getLayer.getUpdaterByParam("W").asInstanceOf[Nesterovs].getLearningRate),
+        ("Learning Rate", model.getLayerWiseConfigurations.getConf(0).getLayer.getUpdaterByParam("W").asInstanceOf[Nesterovs].getLearningRate.toString),
         ("CPU/GPU Utilization", "Available via Spark UI"),
         ("Data Shuffling and Partitioning", "Tracked in Spark UI"),
         ("Batch Size", batchSize.toString)
       )
 
       try {
-        val fs = FileSystem.get(sc.hadoopConfiguration)
-        val statsOutputStream: OutputStream = fs.create(new Path(statsOutputPath))
-        val writer = new BufferedWriter(new OutputStreamWriter(statsOutputStream))
-        writer.write("Metric,Value\n")
-        statsData.foreach { case (metric, value) =>
-          writer.write(s"$metric,$value\n")
-        }
-        writer.close()
+        generateStatisticsFile(sc, statsData, statsOutputPath)
         logger.info(s"Statistics saved to $statsOutputPath")
       } catch {
         case ex: Exception => logger.error(s"Error saving statistics to $statsOutputPath", ex)
@@ -249,5 +217,58 @@ object HW2 {
     val model = new MultiLayerNetwork(conf)
     model.init()
     model
+  }
+
+
+  // Helper function to load token data
+  def loadTokenData(sc: SparkContext, tokenDataPath: String): RDD[TokenData] = {
+    sc.textFile(tokenDataPath).flatMap { line =>
+      val parts = line.split(",")
+      if (parts.length == 3) {
+        val word = parts(0)
+        val tokensList = parts(1).replaceAll("[\\[\\]]", "").split(" ").flatMap(safeToInt)
+        val frequency = safeToInt(parts(2))
+        frequency match {
+          case Some(freq) => tokensList.map(token => TokenData(word, token, freq))
+          case None => None
+        }
+      } else None
+    }
+  }
+
+  // Helper function to load embedding data
+  def loadEmbeddingData(sc: SparkContext, embeddingPath: String): RDD[EmbeddingData] = {
+    sc.textFile(embeddingPath).flatMap { line =>
+      val parts = line.split(",")
+      if (parts.length > 2) {
+        val tokenOpt = safeToInt(parts(0))
+        val word = parts(1)
+        val embeddings = parts.drop(2).flatMap(safeToDouble)
+        tokenOpt match {
+          case Some(token) if embeddings.nonEmpty => Some(EmbeddingData(token, word, embeddings))
+          case _ => None
+        }
+      } else None
+    }
+  }
+
+  // Function to save model to HDFS
+  def saveModel(sc: SparkContext, model: MultiLayerNetwork, modelOutputPath: String): Unit = {
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    val outputStream: OutputStream = fs.create(new Path(modelOutputPath))
+    ModelSerializer.writeModel(model, outputStream, true)
+    outputStream.close()
+  }
+
+  // Function to generate statistics CSV file
+  def generateStatisticsFile(sc: SparkContext, statsData: Seq[(String, String)], statsOutputPath: String): Unit = {
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    val outputStream: OutputStream = fs.create(new Path(statsOutputPath))
+    val writer = new BufferedWriter(new OutputStreamWriter(outputStream))
+    writer.write("Metric,Value\n")
+    statsData.foreach { case (metric, value) =>
+      writer.write(s"$metric,$value\n")
+    }
+    writer.close()
   }
 }
