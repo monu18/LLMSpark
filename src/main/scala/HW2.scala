@@ -40,10 +40,10 @@ object HW2 {
         )
       case "aws" =>
         (
-          "s3://yourbucket/input/embeddings.csv",
-          "s3://yourbucket/input/part-r-00000",
-          "s3://yourbucket/output/decoder_model.zip",
-          "s3://yourbucket/output/training_stats.csv",
+          "s3://llmspark/input/embeddings.csv",
+          "s3://llmspark/input/part-r-00000",
+          "s3://llmspark/output/decoder_model.zip",
+          "s3://llmspark/output/training_stats.csv",
           "yarn"
         )
       case _ => // Local
