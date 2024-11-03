@@ -14,6 +14,7 @@ import org.nd4j.linalg.dataset.DataSet
 import org.nd4j.linalg.factory.Nd4j
 import org.nd4j.linalg.learning.config.Nesterovs
 import org.nd4j.linalg.lossfunctions.LossFunctions
+import utils.ConfigUtil
 
 import java.io.{BufferedWriter, OutputStream, OutputStreamWriter}
 
@@ -25,60 +26,41 @@ object HW2 {
 
   def main(args: Array[String]): Unit = {
 
+    val logger = Logger.getLogger(getClass.getName)
+    Logger.getLogger("org").setLevel(Level.ERROR)
+
     // Check if enough arguments are passed
     if (args.length < 5) {
-      println("Usage: HW2 <embeddingPath> <tokenDataPath> <modelOutputPath> <statsOutputPath> <master>")
-      sys.exit(1)
+      logger.warn("args length is less than 5")
     }
 
-    // Extract arguments from the command line
-    val embeddingPath = args(0)
-    val tokenDataPath = args(1)
-    val modelOutputPath = args(2)
-    val statsOutputPath = args(3)
-    val master = args(4)
+    // Initialize configuration
+    ConfigUtil.initializeConfig(args.toList)
 
-    // Determine the environment
-//    val env = if (args.nonEmpty) args(0) else sys.env.getOrElse("APP_ENV", "local")
-//    println("env " + env)
+    // Access configuration values
+    val config = ConfigUtil.finalConfig
 
-    // Configure paths and Spark master based on environment
-//    val (embeddingPath, tokenDataPath, modelOutputPath, statsOutputPath, master) = env match {
-//      case "spark" =>
-//        (
-//          "hdfs://localhost:9000/user/spark/input/embeddings.csv",
-//          "hdfs://localhost:9000/user/spark/input/part-r-00000",
-//          "hdfs://localhost:9000/user/spark/output/decoder_model.zip",
-//          "hdfs://localhost:9000/user/spark/output/training_stats.csv",
-//          "spark://Monus-MacBook-Air.local:7077"
-//        )
-//      case "aws" =>
-//        (
-//          "s3://llmspark/input/embeddings.csv",
-//          "s3://llmspark/input/part-r-00000",
-//          "s3://llmspark/output/decoder_model.zip",
-//          "s3://llmspark/output/training_stats.csv",
-//          "yarn"
-//        )
-//      case _ => // Local
-//        (
-//          "src/main/resources/input/embeddings.csv",
-//          "src/main/resources/input/part-r-00000",
-//          "src/main/resources/output/decoder_model.zip",
-//          "src/main/resources/output/training_stats.csv",
-//          "local[*]"
-//        )
-//    }
+    // Extract arguments or use defaults from config
+    val embeddingPath = config.embeddingPath
+    val tokenDataPath = config.tokenDataPath
+    val modelOutputPath = config.modelOutputPath
+    val statsOutputPath = config.statsOutputPath
+    val master = config.master
+    val learningRate = config.learningRate
+    val momentum = config.momentum
+    val batchSize = config.batchSize
+    val windowSize = config.windowSize
+
+    logger.info(s"Embedding path: $embeddingPath")
+    logger.info(s"Token data path: $tokenDataPath")
+    logger.info(s"Model output path: $modelOutputPath")
+    logger.info(s"Stats output path: $statsOutputPath")
+    logger.info(s"Spark master: $master")
 
 
     // Set up Spark configuration
-    val conf = new SparkConf().setAppName("HW2-SlidingWindowWithPositionalEmbedding").setMaster(master)
+    val conf = new SparkConf().setAppName("LLMSpark").setMaster(master)
     val sc = new SparkContext(conf)
-    Logger.getLogger("org").setLevel(Level.ERROR)
-
-    // Parameters
-    val windowSize = 4
-    val batchSize = 32
 
     // Start time for tracking training duration
     val trainingStartTime = System.currentTimeMillis()
@@ -139,7 +121,7 @@ object HW2 {
     val trainingJavaRDD = trainingDataRDD.toJavaRDD()
 
     // Create and configure the model
-    val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim)
+    val model = createModel(numInputs = windowSize * embeddingDim, numOutputs = embeddingDim, learningRate, momentum)
     model.setListeners(new ScoreIterationListener(10))
     val trainingMaster = new ParameterAveragingTrainingMaster.Builder(batchSize)
       .batchSizePerWorker(batchSize)
@@ -233,10 +215,9 @@ object HW2 {
   }
 
   // Model creation function
-  val learningRate = 0.01
-  def createModel(numInputs: Int, numOutputs: Int): MultiLayerNetwork = {
+  def createModel(numInputs: Int, numOutputs: Int, learningRate: Double, momentum: Double): MultiLayerNetwork = {
     val conf = new NeuralNetConfiguration.Builder()
-      .updater(new Nesterovs(learningRate, 0.9))
+      .updater(new Nesterovs(learningRate, momentum))
       .list()
       .layer(new DenseLayer.Builder().nIn(numInputs).nOut(numOutputs).activation(Activation.RELU).build())
       .layer(new OutputLayer.Builder(LossFunctions.LossFunction.MSE).nIn(numOutputs).nOut(numOutputs).activation(Activation.IDENTITY).build())
