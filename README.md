@@ -37,7 +37,7 @@ sbt clean compile test
 4. **Open the project in IntelliJ:**  
    [How to Open a Project in IntelliJ](https://www.jetbrains.com/help/idea/import-project-or-module-wizard.html#open-project)
 
-## Configuration Utility for LLMForge
+## Configuration Utility for LLMSpark
 The `ConfigUtil` object, located in `src/main/scala/utils/ConfigUtil.scala`, is responsible for managing application configurations for the LLMSpark project. This utility loads default configurations from the `application.conf` file found in `src/main/resources/`, allowing for flexibility in path settings based on command-line arguments.
 
 ### Configuration Behavior:
