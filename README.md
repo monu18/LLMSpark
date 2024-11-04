@@ -78,8 +78,6 @@ The project comprises the following key components:
 	•	The neural network model is configured with two layers: a dense layer and an output layer, with Nesterovs optimizer for gradient descent. Deeplearning4j’s ParameterAveragingTrainingMaster is used to manage distributed training through parameter averaging.
 	2.	Training Loop with Metrics Collection:
 	•	Epoch Training: For each epoch, the model is trained on the distributed dataset, with CustomSparkListener capturing metrics such as task duration and shuffle data usage.
-	•	Model Serialization: The model is serialized and broadcasted to allow accuracy computation on the training and validation sets.
-	•	Accuracy Calculation: Accuracy for training and validation datasets is computed using computeAccuracy, which compares the model’s predictions with actual labels.
 
 4. **Metrics Logging, Model Saving, and Final Statistics**  
    Following training, the program logs metrics and saves the model:
