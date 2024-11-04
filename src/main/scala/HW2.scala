@@ -1,5 +1,6 @@
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
+import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration
@@ -16,7 +17,51 @@ import org.nd4j.linalg.learning.config.Nesterovs
 import org.nd4j.linalg.lossfunctions.LossFunctions
 import utils.ConfigUtil
 
-import java.io.{BufferedWriter, OutputStream, OutputStreamWriter}
+import java.io.{BufferedWriter, ByteArrayOutputStream, OutputStream, OutputStreamWriter}
+import java.lang.management.ManagementFactory
+import scala.collection.mutable.ArrayBuffer
+
+case class EpochMetrics(
+                         epoch: Int,
+                         timestamp: Long,
+                         trainingLoss: Double,
+                         trainingAccuracy: Double,
+                         validationAccuracy: Double,
+                         learningRate: Double,
+                         usedMemoryMB: Long,
+                         totalMemoryMB: Long,
+                         maxMemoryMB: Long,
+                         totalShuffleReadBytes: Long,
+                         totalShuffleWriteBytes: Long,
+                         maxTaskDuration: Long,
+                         minTaskDuration: Long,
+                         avgTaskDuration: Double,
+                         failedTaskCount: Int,
+                         processCpuLoad: Double,
+                         systemCpuLoad: Double
+                       )
+
+class CustomSparkListener extends org.apache.spark.scheduler.SparkListener {
+  val taskMetricsData = ArrayBuffer[TaskMetricsData]()
+  var failedTaskCount: Int = 0
+
+  override def onTaskEnd(taskEnd: org.apache.spark.scheduler.SparkListenerTaskEnd): Unit = {
+    val metrics = taskEnd.taskMetrics
+    val shuffleReadBytes = Option(metrics.shuffleReadMetrics).map(_.totalBytesRead).getOrElse(0L)
+    val shuffleWriteBytes = Option(metrics.shuffleWriteMetrics).map(_.bytesWritten).getOrElse(0L)
+    val taskDuration = taskEnd.taskInfo.duration
+
+    taskMetricsData += TaskMetricsData(taskEnd.taskInfo.taskId, taskDuration, shuffleReadBytes, shuffleWriteBytes)
+    if (taskEnd.taskInfo.failed) failedTaskCount += 1
+  }
+
+  def reset(): Unit = {
+    taskMetricsData.clear()
+    failedTaskCount = 0
+  }
+}
+
+case class TaskMetricsData(taskId: Long, duration: Long, shuffleReadBytes: Long, shuffleWriteBytes: Long)
 
 object HW2 {
 
@@ -34,7 +79,7 @@ object HW2 {
 
     // Check if enough arguments are passed
     if (args.length < 5) {
-      logger.warn("Not enough arguments passed. Expected at least 5 arguments.")
+      logger.warn("Not enough arguments passed. Expected at least 5 arguments. Adding Default")
     }
 
     // Initialize configuration
@@ -115,7 +160,74 @@ object HW2 {
 
       // Train the model using distributed Spark
       val sparkModel = new SparkDl4jMultiLayer(sc, model, trainingMaster)
-      sparkModel.fit(trainingJavaRDD)
+
+      val customListener = new CustomSparkListener()
+      sc.addSparkListener(customListener)
+
+      val metricsBuffer = ArrayBuffer[EpochMetrics]()
+      val Array(trainingDataSetsRDD, validationDataSetsRDD) = trainingDataRDD.randomSplit(Array(0.8, 0.2))
+      val trainingDataSetsJavaRDD = trainingDataSetsRDD.toJavaRDD()
+      val validationDataSetsJavaRDD = validationDataSetsRDD.toJavaRDD()
+
+      for (epoch <- 1 to 10) {
+        val epochStartTime = System.currentTimeMillis()
+        logger.info(s"Starting epoch $epoch")
+
+        customListener.reset()
+        sparkModel.fit(trainingJavaRDD)
+        val epochEndTime = System.currentTimeMillis()
+        val epochDuration = epochEndTime - epochStartTime
+
+        val modelOutputStream = new ByteArrayOutputStream()
+        ModelSerializer.writeModel(sparkModel.getNetwork, modelOutputStream, false)
+        val modelBytes = modelOutputStream.toByteArray
+        val modelBroadcast = sc.broadcast(modelBytes)
+
+        val trainingAccuracy = computeAccuracy(trainingDataSetsJavaRDD, modelBroadcast)
+        val validationAccuracy = computeAccuracy(validationDataSetsJavaRDD, modelBroadcast)
+
+        val runtime = Runtime.getRuntime
+        val usedMemoryMB = (runtime.totalMemory - runtime.freeMemory) / (1024 * 1024)
+        val totalMemoryMB = runtime.totalMemory / (1024 * 1024)
+        val maxMemoryMB = runtime.maxMemory / (1024 * 1024)
+
+        val osBean = ManagementFactory.getOperatingSystemMXBean.asInstanceOf[com.sun.management.OperatingSystemMXBean]
+        val processCpuLoad = osBean.getProcessCpuLoad * 100
+        val systemCpuLoad = osBean.getSystemCpuLoad * 100
+
+        val totalShuffleReadBytes = customListener.taskMetricsData.map(_.shuffleReadBytes).sum
+        val totalShuffleWriteBytes = customListener.taskMetricsData.map(_.shuffleWriteBytes).sum
+        val taskDurations = customListener.taskMetricsData.map(_.duration)
+        val maxTaskDuration = if (taskDurations.nonEmpty) taskDurations.max else 0L
+        val minTaskDuration = if (taskDurations.nonEmpty) taskDurations.min else 0L
+        val avgTaskDuration = if (taskDurations.nonEmpty) taskDurations.sum.toDouble / taskDurations.size else 0.0
+
+        logger.info(s"Epoch $epoch - Duration: $epochDuration ms, CPU Load: $processCpuLoad%, Memory Usage: Used $usedMemoryMB MB, Max: $maxMemoryMB MB")
+
+        val epochMetrics = EpochMetrics(
+          epoch,
+          epochEndTime,
+          sparkModel.getScore,
+          trainingAccuracy,
+          validationAccuracy,
+          learningRate,
+          usedMemoryMB,
+          totalMemoryMB,
+          maxMemoryMB,
+          totalShuffleReadBytes,
+          totalShuffleWriteBytes,
+          maxTaskDuration,
+          minTaskDuration,
+          avgTaskDuration,
+          customListener.failedTaskCount,
+          processCpuLoad,
+          systemCpuLoad
+        )
+        metricsBuffer += epochMetrics
+
+      }
+      saveMetricsToCSV(metricsBuffer, statsOutputPath)
+
       logger.info("Model training completed")
 
       // End time for tracking training duration
@@ -144,7 +256,7 @@ object HW2 {
       )
 
       try {
-        generateStatisticsFile(sc, statsData, statsOutputPath)
+        //generateStatisticsFile(sc, statsData, statsOutputPath)
         logger.info(s"Statistics saved to $statsOutputPath")
       } catch {
         case ex: Exception => logger.error(s"Error saving statistics to $statsOutputPath", ex)
@@ -271,4 +383,38 @@ object HW2 {
     }
     writer.close()
   }
+
+  def saveMetricsToCSV(metrics: Seq[EpochMetrics], path: String): Unit = {
+    val fs = FileSystem.get(new java.net.URI(path), new org.apache.hadoop.conf.Configuration())
+    val output = if (fs.exists(new Path(path))) fs.append(new Path(path)) else fs.create(new Path(path))
+    val writer = new BufferedWriter(new OutputStreamWriter(output))
+
+    // Write header only if the file is being created for the first time
+
+    writer.write("Epoch,Timestamp,TrainingLoss,LearningRate,UsedMemoryMB,TotalMemoryMB,MaxMemoryMB,TotalShuffleReadBytes,TotalShuffleWriteBytes,MaxTaskDuration,MinTaskDuration,AvgTaskDuration,FailedTaskCount,ProcessCpuLoad,SystemCpuLoad,TrainingAccuracy,ValidationAccuracy\n")
+
+    // Write each epoch's metrics
+    metrics.foreach { metric =>
+      writer.write(s"${metric.epoch},${metric.timestamp},${metric.trainingLoss},${metric.learningRate},${metric.usedMemoryMB},${metric.totalMemoryMB},${metric.maxMemoryMB},${metric.totalShuffleReadBytes},${metric.totalShuffleWriteBytes},${metric.maxTaskDuration},${metric.minTaskDuration},${metric.avgTaskDuration},${metric.failedTaskCount},${metric.processCpuLoad},${metric.systemCpuLoad},${metric.trainingAccuracy},${metric.validationAccuracy}\n")
+    }
+    writer.close()
+  }
+
+  def computeAccuracy(data: JavaRDD[DataSet], modelBroadcast: org.apache.spark.broadcast.Broadcast[Array[Byte]]): Double = {
+    val predictions = data.rdd.mapPartitions { iter =>
+      // Deserialize model
+      val modelInputStream = new java.io.ByteArrayInputStream(modelBroadcast.value)
+      val model = ModelSerializer.restoreMultiLayerNetwork(modelInputStream, false)
+
+      iter.map { ds =>
+        val output = model.output(ds.getFeatures)
+        val label = ds.getLabels
+        output.equals(label)
+      }
+    }
+    val total = predictions.count()
+    val correct = predictions.filter(identity).count()
+    correct.toDouble / total
+  }
+
 }
