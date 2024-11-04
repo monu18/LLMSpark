@@ -6,7 +6,7 @@
 ## Introduction
 In this homework assignment we leverage Apache Spark and Deeplearning4j to train a neural network on large-scale text data within a distributed computing environment. By applying a sliding window approach and incorporating positional embeddings, the model captures sequential context for enhanced language modeling. Key components include data tokenization, sliding window generation, model setup, and accuracy assessment, with comprehensive metrics tracked across each epoch to monitor resource utilization and model performance. The setup is optimized for Spark clusters, facilitating efficient processing and analysis of extensive datasets.
 
-**Video Link:** [] (The video explains the deployment of the Spark application in the AWS EMR Cluster and the project structure.)
+**Video Link:** [https://youtu.be/AdRrHLsCkYA] (The video explains the deployment of the Spark application in the AWS EMR Cluster and the project structure.)
 
 ## Environment
 - **OS:** Mac
