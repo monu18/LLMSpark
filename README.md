@@ -1,6 +1,7 @@
 # Parallelized Model Training with Metrics Tracking and Management on Spark and DeepLearning4j
 # Author: Monu Kumar
 # Email: mkuma47@uic.edu
+# UIN: 678818099
 
 ## Introduction
 In this homework assignment we leverage Apache Spark and Deeplearning4j to train a neural network on large-scale text data within a distributed computing environment. By applying a sliding window approach and incorporating positional embeddings, the model captures sequential context for enhanced language modeling. Key components include data tokenization, sliding window generation, model setup, and accuracy assessment, with comprehensive metrics tracked across each epoch to monitor resource utilization and model performance. The setup is optimized for Spark clusters, facilitating efficient processing and analysis of extensive datasets.
